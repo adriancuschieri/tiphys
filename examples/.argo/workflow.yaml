@@ -1,0 +1,126 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: ci-pipeline-
+spec:
+  # These parameters are automatically injected by the webhook service at runtime.
+  # You can reference them anywhere with {{workflow.parameters.<name>}}
+  arguments:
+    parameters:
+      - name: repo        # e.g. "myorg/myrepo"
+      - name: commit      # full commit SHA
+      - name: branch      # short branch name, e.g. "main"
+      - name: ref         # full git ref, e.g. "refs/heads/main"
+      - name: clone_url   # HTTPS clone URL
+      - name: event_type  # "push" or "pull_request"
+      # PR-only parameters (only set for pull_request events):
+      # - name: pr_number
+      # - name: pr_action
+
+  entrypoint: ci
+
+  # Share the workspace volume across all steps
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+  templates:
+    # -------------------------------------------------------
+    # Top-level CI pipeline (DAG or steps)
+    # -------------------------------------------------------
+    - name: ci
+      steps:
+        - - name: checkout
+            template: git-clone
+            arguments:
+              parameters:
+                - name: clone_url
+                  value: "{{workflow.parameters.clone_url}}"
+                - name: commit
+                  value: "{{workflow.parameters.commit}}"
+
+        - - name: test
+            template: run-tests
+
+        - - name: build
+            template: build-image
+            arguments:
+              parameters:
+                - name: image_tag
+                  value: "{{workflow.parameters.commit}}"
+
+    # -------------------------------------------------------
+    # Step: Clone the repository
+    # -------------------------------------------------------
+    - name: git-clone
+      inputs:
+        parameters:
+          - name: clone_url
+          - name: commit
+      container:
+        image: alpine/git:2.43.0
+        command: [sh, -c]
+        args:
+          - |
+            git clone {{inputs.parameters.clone_url}} /workspace/src && \
+            cd /workspace/src && \
+            git checkout {{inputs.parameters.commit}}
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+
+    # -------------------------------------------------------
+    # Step: Run tests
+    # -------------------------------------------------------
+    - name: run-tests
+      container:
+        image: golang:1.22-alpine
+        command: [sh, -c]
+        args:
+          - |
+            cd /workspace/src && \
+            go test ./... -v -race -count=1
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+        env:
+          - name: GOPATH
+            value: /go
+          - name: GOCACHE
+            value: /tmp/go-build
+
+    # -------------------------------------------------------
+    # Step: Build and push Docker image (using Kaniko)
+    # -------------------------------------------------------
+    - name: build-image
+      inputs:
+        parameters:
+          - name: image_tag
+      container:
+        image: gcr.io/kaniko-project/executor:v1.21.0
+        args:
+          - "--context=dir:///workspace/src"
+          - "--dockerfile=/workspace/src/Dockerfile"
+          - "--destination=yourregistry/yourimage:{{inputs.parameters.image_tag}}"
+          - "--cache=true"
+          - "--cache-ttl=24h"
+        volumeMounts:
+          - name: workspace
+            mountPath: /workspace
+          # Mount your registry credentials secret:
+          # - name: docker-config
+          #   mountPath: /kaniko/.docker
+
+  # Uncomment to mount registry credentials:
+  # volumes:
+  #   - name: docker-config
+  #     secret:
+  #       secretName: docker-registry-credentials
+  #       items:
+  #         - key: .dockerconfigjson
+  #           path: config.json
