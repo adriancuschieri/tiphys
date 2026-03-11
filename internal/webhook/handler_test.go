@@ -10,8 +10,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/adriancuschieri/tiphys/internal/config"
-	"github.com/adriancuschieri/tiphys/internal/webhook"
+	"github.com/yourorg/github-argo-webhook/internal/config"
+	"github.com/yourorg/github-argo-webhook/internal/webhook"
 	"go.uber.org/zap"
 )
 

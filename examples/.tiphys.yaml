@@ -1,0 +1,86 @@
+version: "1"
+
+# Define when this pipeline runs.
+on:
+  push:
+    branches: ["main", "develop"]
+    ignore: ["release/*"]
+  pull_request:
+    branches: ["main"]
+  tag:
+    pattern: "v*"
+
+pipeline:
+  # Default image for all steps. Each step can override this with its own `image`.
+  image: golang:1.22-alpine
+
+  # Global env vars injected into every step.
+  env:
+    - name: CGO_ENABLED
+      value: "0"
+    - name: GOFLAGS
+      value: "-mod=readonly"
+
+  steps:
+    # ---------------------------------------------------------------
+    # Step 1 — Run tests
+    # ---------------------------------------------------------------
+    - name: test
+      uses: go/test
+      with:
+        packages: "./..."
+        race: "true"
+        count: "1"
+
+    # ---------------------------------------------------------------
+    # Step 2 — Build binary
+    # Runs after `test` completes (sequential default).
+    # ---------------------------------------------------------------
+    - name: build
+      uses: go/build
+      with:
+        output: bin/app
+        ldflags: "-w -s -X main.version={{commit}}"
+        main: "./cmd/server"
+
+    # ---------------------------------------------------------------
+    # Step 3A — Build and push Docker image using a Kubernetes Secret.
+    # Use this when your registry credentials are stored in a K8s Secret
+    # named "docker-registry-credentials" with a .dockerconfigjson key.
+    # ---------------------------------------------------------------
+    - name: docker-push
+      uses: docker/build-push
+      with:
+        image: myregistry/myapp
+        tag: "{{commit}}"
+        dockerfile: Dockerfile
+        registry_secret: docker-registry-credentials   # K8s Secret name
+      dependsOn: [build]
+
+    # ---------------------------------------------------------------
+    # Step 3B — Alternative: env-var based credentials.
+    # Use this when credentials are set as environment variables on the
+    # tiphys webhook service Pod (e.g. via its Deployment env block).
+    # Comment out Step 3A and uncomment this block instead.
+    # ---------------------------------------------------------------
+    # - name: docker-push
+    #   uses: docker/build-push
+    #   with:
+    #     image: myregistry/myapp
+    #     tag: "{{commit}}"
+    #     dockerfile: Dockerfile
+    #     # No registry_secret key — credentials come from env vars below.
+    #   secrets:
+    #     # K8s Secret source: resolved to a valueFrom at compile time.
+    #     - name: DOCKER_USERNAME
+    #       source:
+    #         k8sSecret:
+    #           secretName: registry-creds
+    #           key: username
+    #     # Env source: read from the webhook Pod's own environment,
+    #     # baked into the workflow as a plain string value.
+    #     - name: DOCKER_PASSWORD
+    #       source:
+    #         env:
+    #           varName: REGISTRY_PASSWORD   # must be set in the webhook Deployment
+    #   dependsOn: [build]

@@ -194,3 +194,42 @@ func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "github-argo-webhook/1.0")
 }
+
+
+// FetchRawFile fetches a single file from the repo at the given ref and returns its raw bytes.
+// This satisfies the tiphys.GitHubFetcher interface.
+func (c *Client) FetchRawFile(ctx context.Context, repo, ref, path string) ([]byte, error) {
+	url := fmt.Sprintf("%s/repos/%s/contents/%s?ref=%s", c.baseURL, repo, path, ref)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("file %q not found in %s@%s", path, repo, ref)
+	default:
+		return nil, fmt.Errorf("GitHub API status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var entry contentEntry
+	if err := json.Unmarshal(body, &entry); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+
+	return c.fetchFileContent(ctx, entry)
+}

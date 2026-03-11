@@ -92,3 +92,12 @@ type Sender struct {
 	Login string `json:"login"`
 	ID    int    `json:"id"`
 }
+
+
+// Tag returns the short tag name if the push is a tag event.
+func (e *PushEvent) Tag() string {
+	if len(e.Ref) > len("refs/tags/") && e.Ref[:len("refs/tags/")] == "refs/tags/" {
+		return e.Ref[len("refs/tags/"):]
+	}
+	return ""
+}

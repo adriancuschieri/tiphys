@@ -8,39 +8,35 @@ import (
 
 // Config holds all runtime configuration for the webhook service.
 type Config struct {
-	// Server
-	Port string
-
-	// GitHub
+	Port            string
 	GitHubToken     string
 	WebhookSecret   string
-	PipelineDir     string // Directory in the repo containing pipeline files (default: .argo)
-	AllowedRepos    []string // If non-empty, only accept webhooks from these repos (format: "org/repo")
+	PipelineDir     string
+	AllowedRepos    []string
 
-	// Argo Workflows
-	ArgoNamespace   string
-	KubeconfigPath  string // Empty means in-cluster config
+	ArgoNamespace          string
+	KubeconfigPath         string
+	WorkflowServiceAccount string // SA that workflow pods run as
 
-	// Logging
 	LogLevel string
 }
 
 // Load reads configuration from environment variables.
 func Load() (*Config, error) {
 	cfg := &Config{
-		Port:           getEnvOrDefault("PORT", "8080"),
-		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
-		WebhookSecret:  os.Getenv("WEBHOOK_SECRET"),
-		PipelineDir:    getEnvOrDefault("PIPELINE_DIR", ".argo"),
-		ArgoNamespace:  getEnvOrDefault("ARGO_NAMESPACE", "argo"),
-		KubeconfigPath: os.Getenv("KUBECONFIG"),
-		LogLevel:       getEnvOrDefault("LOG_LEVEL", "info"),
+		Port:                   getEnvOrDefault("PORT", "8080"),
+		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
+		WebhookSecret:          os.Getenv("WEBHOOK_SECRET"),
+		PipelineDir:            getEnvOrDefault("PIPELINE_DIR", ".argo"),
+		ArgoNamespace:          getEnvOrDefault("ARGO_NAMESPACE", "argo"),
+		KubeconfigPath:         os.Getenv("KUBECONFIG"),
+		WorkflowServiceAccount: getEnvOrDefault("WORKFLOW_SERVICE_ACCOUNT", "workflow"),
+		LogLevel:               getEnvOrDefault("LOG_LEVEL", "info"),
 	}
 
 	if repos := os.Getenv("ALLOWED_REPOS"); repos != "" {
 		for _, r := range strings.Split(repos, ",") {
-			r = strings.TrimSpace(r)
-			if r != "" {
+			if r = strings.TrimSpace(r); r != "" {
 				cfg.AllowedRepos = append(cfg.AllowedRepos, r)
 			}
 		}
@@ -49,7 +45,6 @@ func Load() (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-
 	return cfg, nil
 }
 
@@ -63,7 +58,6 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// IsRepoAllowed returns true if no allowlist is configured, or the repo is in the allowlist.
 func (c *Config) IsRepoAllowed(repo string) bool {
 	if len(c.AllowedRepos) == 0 {
 		return true

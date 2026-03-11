@@ -14,7 +14,8 @@ import (
 	"github.com/adriancuschieri/tiphys/internal/argo"
 	"github.com/adriancuschieri/tiphys/internal/config"
 	gh "github.com/adriancuschieri/tiphys/internal/github"
-	"github.com/adriancuschieri/tiphys/internal/pipeline"
+	"github.com/adriancuschieri/tiphys/internal/tiphys"
+	"github.com/adriancuschieri/tiphys/internal/tiphys/steps"
 	"go.uber.org/zap"
 )
 
@@ -43,14 +44,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB max
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
 		h.logger.Error("failed to read request body", zap.Error(err))
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
 
-	// Validate HMAC signature from GitHub
 	if !h.validateSignature(r.Header.Get("X-Hub-Signature-256"), body) {
 		h.logger.Warn("invalid webhook signature", zap.String("remote_addr", r.RemoteAddr))
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
@@ -67,80 +67,62 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch eventType {
 	case "push":
-		h.handlePush(w, r, body, deliveryID)
+		h.handlePush(w, body, deliveryID)
 	case "pull_request":
-		h.handlePullRequest(w, r, body, deliveryID)
+		h.handlePullRequest(w, body, deliveryID)
 	case "ping":
-		h.logger.Info("received ping from GitHub")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, `{"status":"pong"}`)
 	default:
-		h.logger.Debug("ignoring unsupported event type", zap.String("event", eventType))
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"status":"ignored","event":"%s"}`, eventType)
 	}
 }
 
-// handlePush processes push events and triggers CI workflows.
-func (h *Handler) handlePush(w http.ResponseWriter, r *http.Request, body []byte, deliveryID string) {
+func (h *Handler) handlePush(w http.ResponseWriter, body []byte, deliveryID string) {
 	var event PushEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		h.logger.Error("failed to parse push event", zap.Error(err))
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
 
-	// Filter out tag pushes and empty commits
-	if event.IsTag() {
-		h.logger.Debug("ignoring tag push", zap.String("ref", event.Ref))
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"status":"ignored","reason":"tag push"}`)
+	repo := event.Repository.FullName
+	if !h.cfg.IsRepoAllowed(repo) {
+		http.Error(w, "repo not allowed", http.StatusForbidden)
 		return
 	}
 
 	if event.HeadCommit.ID == "" {
-		h.logger.Debug("ignoring push with no head commit (branch deletion?)")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	repo := event.Repository.FullName
-	if !h.cfg.IsRepoAllowed(repo) {
-		h.logger.Warn("webhook from non-allowed repo", zap.String("repo", repo))
-		http.Error(w, "repo not allowed", http.StatusForbidden)
-		return
-	}
-
-	// Acknowledge immediately; trigger async
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprint(w, `{"status":"accepted"}`)
 
-	go h.triggerPushWorkflow(event, deliveryID)
+	go h.runPipeline(tiphys.Event{
+		Type:   tiphys.EventPush,
+		Ref:    event.Ref,
+		Branch: event.Branch(),
+		Tag:    event.Tag(),
+	}, steps.RuntimeParams{
+		Repo:      repo,
+		Commit:    event.HeadCommit.ID,
+		Branch:    event.Branch(),
+		CloneURL:  event.Repository.CloneURL,
+		EventType: "push",
+	}, deliveryID)
 }
 
-// handlePullRequest processes PR events and triggers CI workflows.
-func (h *Handler) handlePullRequest(w http.ResponseWriter, r *http.Request, body []byte, deliveryID string) {
+func (h *Handler) handlePullRequest(w http.ResponseWriter, body []byte, deliveryID string) {
 	var event PullRequestEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		h.logger.Error("failed to parse pull_request event", zap.Error(err))
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
 
-	// Only run CI on open/reopen/sync actions
-	switch event.Action {
-	case "opened", "reopened", "synchronize":
-		// proceed
-	default:
-		h.logger.Debug("ignoring PR action", zap.String("action", event.Action))
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ignored","action":"%s"}`, event.Action)
-		return
-	}
-
 	repo := event.Repository.FullName
 	if !h.cfg.IsRepoAllowed(repo) {
-		h.logger.Warn("webhook from non-allowed repo", zap.String("repo", repo))
 		http.Error(w, "repo not allowed", http.StatusForbidden)
 		return
 	}
@@ -148,118 +130,84 @@ func (h *Handler) handlePullRequest(w http.ResponseWriter, r *http.Request, body
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprint(w, `{"status":"accepted"}`)
 
-	go h.triggerPRWorkflow(event, deliveryID)
+	go h.runPipeline(tiphys.Event{
+		Type:     tiphys.EventPullRequest,
+		Ref:      fmt.Sprintf("refs/pull/%d/head", event.PullRequest.Number),
+		Branch:   event.PullRequest.Head.Ref,
+		PRAction: event.Action,
+		PRBase:   event.PullRequest.Base.Ref,
+	}, steps.RuntimeParams{
+		Repo:      repo,
+		Commit:    event.PullRequest.Head.SHA,
+		Branch:    event.PullRequest.Head.Ref,
+		CloneURL:  event.Repository.CloneURL,
+		EventType: "pull_request",
+		PRNumber:  fmt.Sprintf("%d", event.PullRequest.Number),
+	}, deliveryID)
 }
 
-// triggerPushWorkflow fetches the pipeline config and submits a workflow for a push event.
-func (h *Handler) triggerPushWorkflow(event PushEvent, deliveryID string) {
+// runPipeline is the core async flow:
+//  1. Load .tiphys.yaml from the repo
+//  2. Check if the event matches the trigger rules
+//  3. Compile the config into an Argo Workflow
+//  4. Submit it
+func (h *Handler) runPipeline(event tiphys.Event, params steps.RuntimeParams, deliveryID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	logger := h.logger.With(
-		zap.String("repo", event.Repository.FullName),
-		zap.String("commit", event.HeadCommit.ID),
-		zap.String("branch", event.Branch()),
+		zap.String("repo", params.Repo),
+		zap.String("commit", params.Commit),
+		zap.String("branch", params.Branch),
+		zap.String("event_type", params.EventType),
 		zap.String("delivery_id", deliveryID),
 	)
 
-	logger.Info("triggering push workflow")
-
-	files, err := h.githubClient.FetchPipelineFiles(ctx, event.Repository.FullName, event.HeadCommit.ID, h.cfg.PipelineDir)
+	// 1. Load .tiphys.yaml
+	cfg, err := tiphys.LoadConfig(ctx, h.githubClient, params.Repo, params.Commit)
 	if err != nil {
-		logger.Error("failed to fetch pipeline files", zap.Error(err))
+		logger.Error("failed to load .tiphys.yaml", zap.Error(err))
 		return
 	}
 
-	wf, err := pipeline.LoadWorkflow(files)
-	if err != nil {
-		logger.Error("failed to load workflow definition", zap.Error(err))
+	// 2. Check trigger rules
+	if !tiphys.ShouldTrigger(cfg.On, event) {
+		logger.Info("event does not match trigger rules — skipping",
+			zap.String("ref", event.Ref),
+		)
 		return
 	}
 
-	params := map[string]string{
-		"repo":       event.Repository.FullName,
-		"commit":     event.HeadCommit.ID,
-		"branch":     event.Branch(),
-		"ref":        event.Ref,
-		"clone_url":  event.Repository.CloneURL,
-		"event_type": "push",
-		"delivery_id": deliveryID,
+	// 3. Compile into Argo Workflow
+	wf, err := tiphys.Compile(cfg, params, &tiphys.CompilerOptions{
+		DefaultArrangement: tiphys.ArrangeSequential,
+		ServiceAccountName: h.cfg.WorkflowServiceAccount,
+	})
+	if err != nil {
+		logger.Error("failed to compile pipeline", zap.Error(err))
+		return
 	}
 
-	submitted, err := h.argoClient.SubmitWorkflow(ctx, wf, params)
+	// 4. Submit
+	submitted, err := h.argoClient.SubmitWorkflow(ctx, wf, nil)
 	if err != nil {
 		logger.Error("failed to submit workflow", zap.Error(err))
 		return
 	}
 
-	logger.Info("workflow submitted successfully",
+	logger.Info("workflow submitted",
 		zap.String("workflow_name", submitted.Name),
 		zap.String("namespace", submitted.Namespace),
 	)
 }
 
-// triggerPRWorkflow fetches the pipeline config and submits a workflow for a PR event.
-func (h *Handler) triggerPRWorkflow(event PullRequestEvent, deliveryID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	logger := h.logger.With(
-		zap.String("repo", event.Repository.FullName),
-		zap.String("commit", event.PullRequest.Head.SHA),
-		zap.String("branch", event.PullRequest.Head.Ref),
-		zap.Int("pr_number", event.PullRequest.Number),
-		zap.String("delivery_id", deliveryID),
-	)
-
-	logger.Info("triggering PR workflow")
-
-	files, err := h.githubClient.FetchPipelineFiles(ctx, event.Repository.FullName, event.PullRequest.Head.SHA, h.cfg.PipelineDir)
-	if err != nil {
-		logger.Error("failed to fetch pipeline files", zap.Error(err))
-		return
-	}
-
-	wf, err := pipeline.LoadWorkflow(files)
-	if err != nil {
-		logger.Error("failed to load workflow definition", zap.Error(err))
-		return
-	}
-
-	params := map[string]string{
-		"repo":       event.Repository.FullName,
-		"commit":     event.PullRequest.Head.SHA,
-		"branch":     event.PullRequest.Head.Ref,
-		"ref":        fmt.Sprintf("refs/pull/%d/head", event.PullRequest.Number),
-		"clone_url":  event.Repository.CloneURL,
-		"pr_number":  fmt.Sprintf("%d", event.PullRequest.Number),
-		"event_type": "pull_request",
-		"pr_action":  event.Action,
-		"delivery_id": deliveryID,
-	}
-
-	submitted, err := h.argoClient.SubmitWorkflow(ctx, wf, params)
-	if err != nil {
-		logger.Error("failed to submit workflow", zap.Error(err))
-		return
-	}
-
-	logger.Info("workflow submitted successfully",
-		zap.String("workflow_name", submitted.Name),
-		zap.String("namespace", submitted.Namespace),
-	)
-}
-
-// validateSignature verifies the HMAC-SHA256 signature from GitHub.
 func (h *Handler) validateSignature(signatureHeader string, body []byte) bool {
 	const prefix = "sha256="
 	if len(signatureHeader) <= len(prefix) {
 		return false
 	}
-
 	mac := hmac.New(sha256.New, []byte(h.cfg.WebhookSecret))
 	mac.Write(body)
 	expected := prefix + hex.EncodeToString(mac.Sum(nil))
-
 	return hmac.Equal([]byte(expected), []byte(signatureHeader))
 }
