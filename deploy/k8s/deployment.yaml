@@ -78,7 +78,7 @@ roleRef:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: github-argo-webhook
+  name: tiphys
   namespace: tiphys
   labels:
     app: tiphys
@@ -101,7 +101,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: webhook-server
-          image: tiphys:1.1.0  # Replace with your image
+          image: tiphys:2.1.0  # Replace with your image
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -116,6 +116,8 @@ spec:
               value: ".argo"
             - name: LOG_LEVEL
               value: "info"
+            - name: WORKFLOW_SERVICE_ACCOUNT
+              value: "github-argo-webhook"  
             # Optionally restrict to specific repos:
             # - name: ALLOWED_REPOS
             #   value: "myorg/repo1,myorg/repo2"
@@ -189,7 +191,7 @@ spec:
   #       - webhook.your-domain.com
   #     secretName: webhook-tls
   rules:
-    - host: bd2a-88-203-112-244.ngrok-free.app  # Replace with your domain
+    - host: 4ce0-88-203-112-244.ngrok-free.app  # Replace with your domain
       http:
         paths:
           - path: /webhook

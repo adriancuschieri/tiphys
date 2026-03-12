@@ -2,34 +2,44 @@ package steps
 
 import (
 	"fmt"
+	"strings"
 
 	wfv1 "github.com/argoproj/argo-workflows/v3/pkg/apis/workflow/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 )
 
-const defaultGoImage = "golang:1.22-alpine"
+const (
+	defaultGoImageAlpine = "golang:1.26-alpine"
+	defaultGoImageDebian = "golang:1.26"
+)
 
 func init() {
 	Register("go/test", buildGoTest)
 	Register("go/build", buildGoBuild)
 }
 
-// buildGoTest produces an Argo template that runs `go test`.
-//
-// Supported `with` keys:
-//   packages   — package pattern (default: ./...)
-//   race       — enable race detector: "true"/"false" (default: true)
-//   count      — test count flag (default: 1)
-//   extra_args — raw extra args appended to the go test command
 func buildGoTest(name string, with map[string]string, image string, _ RuntimeParams) (wfv1.Template, error) {
 	if image == "" {
-		image = defaultGoImage
+		image = defaultGoImageAlpine
 	}
 
 	packages := withDefault(with, "packages", "./...")
-	race := withDefault(with, "race", "true")
 	count := withDefault(with, "count", "1")
 	extraArgs := with["extra_args"]
+
+	raceDefault := "false"
+	if !isAlpineImage(image) {
+		raceDefault = "true"
+	}
+	race := withDefault(with, "race", raceDefault)
+
+	if race == "true" && isAlpineImage(image) {
+		return wfv1.Template{}, fmt.Errorf(
+			"step %q: race=true requires a Debian-based Go image (e.g. golang:1.22) — "+
+				"alpine images do not include gcc. Either set race=false or change the image.",
+			name,
+		)
+	}
 
 	raceFlag := ""
 	if race == "true" {
@@ -59,16 +69,9 @@ func buildGoTest(name string, with map[string]string, image string, _ RuntimePar
 	}, nil
 }
 
-// buildGoBuild produces an Argo template that compiles a Go binary.
-//
-// Supported `with` keys:
-//   output     — output path (default: bin/app)
-//   ldflags    — linker flags (default: -w -s)
-//   main       — main package path (default: ./cmd/...)
-//   extra_args — raw extra args appended to the go build command
 func buildGoBuild(name string, with map[string]string, image string, _ RuntimeParams) (wfv1.Template, error) {
 	if image == "" {
-		image = defaultGoImage
+		image = defaultGoImageAlpine
 	}
 
 	output := withDefault(with, "output", "bin/app")
@@ -97,6 +100,10 @@ func buildGoBuild(name string, with map[string]string, image string, _ RuntimePa
 			},
 		},
 	}, nil
+}
+
+func isAlpineImage(image string) bool {
+	return strings.Contains(strings.ToLower(image), "alpine")
 }
 
 func withDefault(m map[string]string, key, def string) string {

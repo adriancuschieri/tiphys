@@ -12,7 +12,7 @@ on:
 
 pipeline:
   # Default image for all steps. Each step can override this with its own `image`.
-  image: golang:1.22-alpine
+  image: golang:1.26-alpine
 
   # Global env vars injected into every step.
   env:

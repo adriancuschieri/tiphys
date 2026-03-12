@@ -180,7 +180,6 @@ func (h *Handler) runPipeline(event tiphys.Event, params steps.RuntimeParams, de
 
 	// 3. Compile into Argo Workflow
 	wf, err := tiphys.Compile(cfg, params, &tiphys.CompilerOptions{
-		DefaultArrangement: tiphys.ArrangeSequential,
 		ServiceAccountName: h.cfg.WorkflowServiceAccount,
 	})
 	if err != nil {
