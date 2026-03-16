@@ -15,7 +15,6 @@ import (
 	"github.com/adriancuschieri/tiphys/internal/argo"
 	"github.com/adriancuschieri/tiphys/internal/config"
 	gh "github.com/adriancuschieri/tiphys/internal/github"
-	
 	"github.com/adriancuschieri/tiphys/internal/webhook"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -29,51 +28,43 @@ func main() {
 }
 
 func run() error {
-	// Load config
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	// Set up structured logger
 	logger, err := buildLogger(cfg.LogLevel)
 	if err != nil {
 		return fmt.Errorf("initialising logger: %w", err)
 	}
 	defer logger.Sync() //nolint:errcheck
 
-	logger.Info("starting github-argo-webhook",
+	logger.Info("starting tiphys",
 		zap.String("port", cfg.Port),
 		zap.String("argo_namespace", cfg.ArgoNamespace),
-		zap.String("pipeline_dir", cfg.PipelineDir),
+		zap.String("workflow_service_account", cfg.WorkflowServiceAccount),
 		zap.Strings("allowed_repos", cfg.AllowedRepos),
 	)
 
-	// Initialise GitHub client
 	githubClient := gh.NewClient(cfg.GitHubToken)
 
-	// Initialise Argo Workflows client
 	argoClient, err := argo.NewClient(cfg.ArgoNamespace, cfg.KubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("initialising argo client: %w", err)
 	}
 
-	// Build HTTP router
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(zapMiddleware(logger))
 	r.Use(middleware.Recoverer)
 
-	// Health check endpoints
 	r.Get("/healthz", healthzHandler)
 	r.Get("/readyz", readyzHandler)
 
-	// Webhook endpoint
 	webhookHandler := webhook.NewHandler(cfg, githubClient, argoClient, logger)
 	r.Post("/webhook", webhookHandler.ServeHTTP)
 
-	// Start HTTP server
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      r,
@@ -82,7 +73,6 @@ func run() error {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Graceful shutdown on SIGTERM / SIGINT
 	shutdownCh := make(chan error, 1)
 	go func() {
 		quit := make(chan os.Signal, 1)
@@ -120,7 +110,6 @@ func readyzHandler(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprint(w, `{"status":"ready"}`)
 }
 
-// zapMiddleware returns a chi-compatible request logger using zap.
 func zapMiddleware(logger *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +127,6 @@ func zapMiddleware(logger *zap.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// buildLogger creates a zap logger configured for the given log level.
 func buildLogger(level string) (*zap.Logger, error) {
 	var lvl zapcore.Level
 	if err := lvl.UnmarshalText([]byte(level)); err != nil {

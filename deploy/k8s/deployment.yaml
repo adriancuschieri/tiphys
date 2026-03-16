@@ -101,7 +101,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: webhook-server
-          image: tiphys:2.1.0  # Replace with your image
+          image: tiphys:3.0.0  # Replace with your image
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -117,7 +117,9 @@ spec:
             - name: LOG_LEVEL
               value: "info"
             - name: WORKFLOW_SERVICE_ACCOUNT
-              value: "github-argo-webhook"  
+              value: "github-argo-webhook"
+            - name: ARGO_UI_BASE_URL
+              value: "http://localhost:2746/"    
             # Optionally restrict to specific repos:
             # - name: ALLOWED_REPOS
             #   value: "myorg/repo1,myorg/repo2"

@@ -11,12 +11,15 @@ type Config struct {
 	Port            string
 	GitHubToken     string
 	WebhookSecret   string
-	PipelineDir     string
 	AllowedRepos    []string
 
 	ArgoNamespace          string
 	KubeconfigPath         string
-	WorkflowServiceAccount string // SA that workflow pods run as
+	WorkflowServiceAccount string
+	// ArgoUIBaseURL is the base URL of the Argo Workflows UI, used to generate
+	// deep links in GitHub PR status checks (e.g. https://argo.your-domain.com).
+	// Leave empty to omit the link from status checks.
+	ArgoUIBaseURL string
 
 	LogLevel string
 }
@@ -27,10 +30,10 @@ func Load() (*Config, error) {
 		Port:                   getEnvOrDefault("PORT", "8080"),
 		GitHubToken:            os.Getenv("GITHUB_TOKEN"),
 		WebhookSecret:          os.Getenv("WEBHOOK_SECRET"),
-		PipelineDir:            getEnvOrDefault("PIPELINE_DIR", ".argo"),
 		ArgoNamespace:          getEnvOrDefault("ARGO_NAMESPACE", "argo"),
 		KubeconfigPath:         os.Getenv("KUBECONFIG"),
 		WorkflowServiceAccount: getEnvOrDefault("WORKFLOW_SERVICE_ACCOUNT", "workflow"),
+		ArgoUIBaseURL:          os.Getenv("ARGO_UI_BASE_URL"),
 		LogLevel:               getEnvOrDefault("LOG_LEVEL", "info"),
 	}
 
